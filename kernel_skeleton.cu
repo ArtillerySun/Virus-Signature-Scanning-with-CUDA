@@ -55,7 +55,7 @@ __global__ void get_hash(
 
 struct TmpResult {
     size_t sample, signature;
-    double match_score;
+    float match_score;
     int hash;
 };
 
@@ -74,6 +74,7 @@ __global__ void matcher(
     size_t signature_idx = blockIdx.y;
 
     if (sample_idx >= SAMPLES_SIZE) return;
+    if (signature_idx >= SIGNATURES_SIZE) return;
     
     size_t sample_start_offset = d_samples_offset[sample_idx];
     size_t sample_end_offset = d_samples_offset[sample_idx + 1];
@@ -86,41 +87,42 @@ __global__ void matcher(
     size_t search_space = sample_len - signature_len + 1;
 
 
-    extern __shared__ char sh_mem_ptr[];
-    double *sh_max = (double*)sh_mem_ptr;
-    unsigned char *sh_is_find = (unsigned char*)&sh_mem_ptr[blockDim.x * sizeof(double)];
+    extern __shared__ char sh_mem[];
+    float* sh_max = (float*)(sh_mem);
+    char* sh_signature_seq = (char*)&sh_max[blockDim.x];
 
-    sh_max[threadIdx.x] = -1.0; 
-    sh_is_find[threadIdx.x] = 0;
+    for (size_t i = threadIdx.x; i < signature_len; i += blockDim.x) {
+        sh_signature_seq[i] = d_signatures_seqs[signature_start_offset + i];
+    }
+
+    sh_max[threadIdx.x] = -1.0;
     __syncthreads();
 
     for (size_t i = threadIdx.x; i < search_space; i += blockDim.x) {
-        double sum = 0;
+        float sum = 0;
         bool flag = true;
         for (size_t j = 0; j < signature_len; j++) {
-            if (!check(d_samples_seqs[sample_start_offset + i + j], d_signatures_seqs[signature_start_offset + j])) {
+            if (!check(d_samples_seqs[sample_start_offset + i + j], sh_signature_seq[j])) {
                 flag = false;
                 break;
             }
             sum += d_samples_phred_score[sample_start_offset + i + j];
         }
         if (flag) {
-            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sum/signature_len);
-            sh_is_find[threadIdx.x] = 1;
+            sh_max[threadIdx.x] = fmaxf(sh_max[threadIdx.x], sum/signature_len);
         }
     }
     __syncthreads();
 
     for (int s = (blockDim.x >> 1); s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            sh_is_find[threadIdx.x] |= sh_is_find[threadIdx.x + s];
-            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sh_max[threadIdx.x + s]);
+            sh_max[threadIdx.x] = fmaxf(sh_max[threadIdx.x], sh_max[threadIdx.x + s]);
         }
         __syncthreads();
     }
 
     if (threadIdx.x == 0) {
-        if (sh_is_find[0]) {
+        if (sh_max[0] >= 0) {
             tmpResult[sample_idx * SIGNATURES_SIZE + signature_idx] = {sample_idx, signature_idx, sh_max[0], d_samples_hash[sample_idx]};
         }
     }
@@ -142,10 +144,17 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
     std::vector<TmpResult> h_tmpResult(SAMPLES_SIZE * SIGNATURES_SIZE);
 
+    for (auto& res : h_tmpResult) {
+        res.match_score = -1.0f;
+    }
+
+    size_t max_sample_len = 0, max_signature_len = 0;
+
     size_t cur_offset = 0;
     h_samples_offset.push_back(cur_offset);
     for (auto& sample : samples) {
         size_t cur_len = sample.seq.length();
+        max_sample_len = std::max(max_sample_len, cur_len);
         h_samples_seqs.insert(h_samples_seqs.end(), sample.seq.begin(), sample.seq.end());
         h_samples_quals.insert(h_samples_quals.end(), sample.qual.begin(), sample.qual.end());
         cur_offset += cur_len;
@@ -156,13 +165,10 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     h_signatures_offset.push_back(cur_offset);
     for (auto& signature : signatures) {
         size_t cur_len = signature.seq.length();
+        max_signature_len = std::max(max_signature_len, cur_len);
         h_signatures_seqs.insert(h_signatures_seqs.end(), signature.seq.begin(), signature.seq.end());
         cur_offset += cur_len;
         h_signatures_offset.push_back(cur_offset);
-    }
-
-    for (auto& res : h_tmpResult) {
-        res.match_score = -1;
     }
 
     // samples on device
@@ -178,6 +184,9 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
     TmpResult* d_tmpResult;
 
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
     // allocate memory for samples on device
     cudaMalloc(&d_samples_seqs, total_samples_len * sizeof(char));
     cudaMalloc(&d_samples_offset, (SAMPLES_SIZE + 1) * sizeof(size_t));
@@ -191,35 +200,31 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaMalloc(&d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult));
 
     // copy samples to device
-    cudaMemcpy(d_samples_seqs, h_samples_seqs.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_samples_offset, h_samples_offset.data(), (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_samples_quals, h_samples_quals.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_samples_seqs, h_samples_seqs.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_samples_offset, h_samples_offset.data(), (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_samples_quals, h_samples_quals.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
 
     // copy signatures to device
-    cudaMemcpy(d_signatures_seqs, h_signatures_seqs.data(), total_signatures_len * sizeof(char), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_signatures_offset, h_signatures_offset.data(), (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
-
-    cudaMemcpy(d_tmpResult, h_tmpResult.data(), SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs.data(), total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_signatures_offset, h_signatures_offset.data(), (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+    
+    cudaMemcpyAsync(d_tmpResult, h_tmpResult.data(), SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice, stream);
 
     // calculate phred score with the +33 version
     int blk_size = 256;
     int blk_num = (total_samples_len + blk_size - 1) / blk_size;
-    get_phred<<<blk_num, blk_size>>>(total_samples_len, d_samples_quals, d_samples_phred_score);
-    cudaDeviceSynchronize(); 
+    get_phred<<<blk_num, blk_size, 0, stream>>>(total_samples_len, d_samples_quals, d_samples_phred_score);
     
     // calculate hash value for all samples
     blk_num = SAMPLES_SIZE;
-    get_hash<<<blk_num, blk_size, blk_size * sizeof(int)>>>(SAMPLES_SIZE, d_samples_phred_score, d_samples_offset, d_samples_hash);
-    cudaDeviceSynchronize();
+    get_hash<<<blk_num, blk_size, blk_size * sizeof(int), stream>>>(SAMPLES_SIZE, d_samples_phred_score, d_samples_offset, d_samples_hash);
 
     // match the signatures
-    
     dim3 grid(SAMPLES_SIZE, SIGNATURES_SIZE);
-    matcher<<<grid, blk_size, blk_size * (sizeof(double) + sizeof(unsigned char))>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
-    cudaDeviceSynchronize();
+    matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(float), stream>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
     
-    
-    cudaMemcpy(h_tmpResult.data(), d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(h_tmpResult.data(), d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
+    cudaStreamSynchronize(stream);
 
     for (int i = 0; i < SAMPLES_SIZE; i ++) {
         for (int j = 0; j < SIGNATURES_SIZE; j ++) {
@@ -230,6 +235,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
         }
     }
     
+    cudaStreamDestroy(stream);
     // release all the allocated memory on device
     cudaFree(d_samples_seqs);
     cudaFree(d_samples_offset);
