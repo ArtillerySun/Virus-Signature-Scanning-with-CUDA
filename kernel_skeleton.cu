@@ -3,45 +3,241 @@
 
 const int P = 97;
 
-void solve(const int hash, const klibpp::KSeq& sample, const klibpp::KSeq& signature, std::vector<MatchResult>& matches) {
-    int len = signature.seq.length();
-    double mx_score = 0;
-    bool is_find = false;
-    for (int i = 0; i + len - 1 < sample.seq.length(); i++) {
-        double sum = 0;
-        bool flag = true;
-        for (int j = 0; j < len; j++) {
-            if (sample.seq[i + j] != 'N' && signature.seq[j] != 'N' && 
-                sample.seq[i + j] != signature.seq[j]) {
-                flag = false;
-                break;
-            }
-            sum += sample.qual[i + j] == 'N' ? 0 : sample.qual[i + j] - 33;
-        }
+__device__ inline bool check(char e, char f) {
+    return e == 'N' || f == 'N' || e == f;
+}
 
-        if (flag) {
-            is_find = true;
-            mx_score = std::max(mx_score, sum / len);
-        }
+__global__ void get_phred(
+    const int len, 
+    const char* d_samples_quals, 
+    unsigned char* d_sample_phred_score) {
 
-        sum = 0;
-    }
-
-    if (is_find) {
-        matches.push_back({sample.name, signature.name, mx_score, hash});
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = id; i < len; i += stride) {
+        d_sample_phred_score[i] = (unsigned char)d_samples_quals[i] - 33;
     }
 }
 
-void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klibpp::KSeq>& signatures, std::vector<MatchResult>& matches) {
+__global__ void get_hash(
+    const int len, 
+    const unsigned char* d_samples_phred_score, 
+    const size_t* d_samples_offset, 
+    unsigned char* d_samples_hash) {
 
-    for (auto& sample : samples) {
-        int hash = 0;
-        for (auto c : sample.qual) {
-            int a = c == 'N' ? 0 : c - 33;
-            hash = (hash + a) % P;
+    int sample_idx = blockIdx.x;
+    if (sample_idx >= len) return;
+
+    size_t start_offset = d_samples_offset[sample_idx];
+    size_t end_offset = d_samples_offset[sample_idx + 1];
+    size_t sample_len = end_offset - start_offset;
+
+    extern __shared__ int sh_sum[];
+    int thread_sum = 0;
+
+    for (size_t i = threadIdx.x; i < sample_len; i += blockDim.x) {
+        thread_sum += d_samples_phred_score[start_offset + i];
+    }
+    sh_sum[threadIdx.x] = thread_sum;
+    __syncthreads();
+
+    for (int s = (blockDim.x >> 1); s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sh_sum[threadIdx.x] += sh_sum[threadIdx.x + s];
         }
-        for (auto& signature : signatures) {
-            solve(hash, sample, signature, matches);
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        d_samples_hash[sample_idx] = sh_sum[0] % P;
+    }
+}
+
+struct TmpResult {
+    size_t sample, signature;
+    double match_score;
+    int hash;
+};
+
+__global__ void matcher(
+    const int SAMPLES_SIZE,
+    const int SIGNATURES_SIZE,
+    const unsigned char* d_samples_hash, 
+    const unsigned char* d_samples_phred_score, 
+    const size_t* d_samples_offset, 
+    const char* d_samples_seqs, 
+    const size_t* d_signatures_offset, 
+    const char* d_signatures_seqs, 
+    TmpResult* tmpResult) {
+    
+    size_t sample_idx = blockIdx.x ;
+    size_t signature_idx = blockIdx.y;
+
+    if (sample_idx >= SAMPLES_SIZE) return;
+    
+    size_t sample_start_offset = d_samples_offset[sample_idx];
+    size_t sample_end_offset = d_samples_offset[sample_idx + 1];
+    size_t sample_len = sample_end_offset - sample_start_offset;
+
+    size_t signature_start_offset = d_signatures_offset[signature_idx];
+    size_t signature_end_offset = d_signatures_offset[signature_idx + 1];
+    size_t signature_len = signature_end_offset - signature_start_offset;
+
+    size_t search_space = sample_len - signature_len + 1;
+
+
+    extern __shared__ char sh_mem_ptr[];
+    double *sh_max = (double*)sh_mem_ptr;
+    unsigned char *sh_is_find = (unsigned char*)&sh_mem_ptr[blockDim.x * sizeof(double)];
+
+    sh_max[threadIdx.x] = -1.0; 
+    sh_is_find[threadIdx.x] = 0;
+    __syncthreads();
+
+    for (size_t i = threadIdx.x; i < search_space; i += blockDim.x) {
+        double sum = 0;
+        bool flag = true;
+        for (size_t j = 0; j < signature_len; j++) {
+            if (!check(d_samples_seqs[sample_start_offset + i + j], d_signatures_seqs[signature_start_offset + j])) {
+                flag = false;
+                break;
+            }
+            sum += d_samples_phred_score[sample_start_offset + i + j];
+        }
+        if (flag) {
+            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sum/signature_len);
+            sh_is_find[threadIdx.x] = 1;
         }
     }
+    __syncthreads();
+
+    for (int s = (blockDim.x >> 1); s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sh_is_find[threadIdx.x] |= sh_is_find[threadIdx.x + s];
+            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sh_max[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        if (sh_is_find[0]) {
+            tmpResult[sample_idx * SIGNATURES_SIZE + signature_idx] = {sample_idx, signature_idx, sh_max[0], d_samples_hash[sample_idx]};
+        }
+    }
+    
+}
+
+void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klibpp::KSeq>& signatures, std::vector<MatchResult>& matches) {
+    
+    const int SAMPLES_SIZE = samples.size();
+    const int SIGNATURES_SIZE = signatures.size();
+    // samples on host
+    std::vector<char> h_samples_seqs;
+    std::vector<char> h_samples_quals;
+    std::vector<size_t> h_samples_offset;
+
+    // signatures on host
+    std::vector<char> h_signatures_seqs;
+    std::vector<size_t> h_signatures_offset;
+
+    std::vector<TmpResult> h_tmpResult(SAMPLES_SIZE * SIGNATURES_SIZE);
+
+    size_t cur_offset = 0;
+    h_samples_offset.push_back(cur_offset);
+    for (auto& sample : samples) {
+        size_t cur_len = sample.seq.length();
+        h_samples_seqs.insert(h_samples_seqs.end(), sample.seq.begin(), sample.seq.end());
+        h_samples_quals.insert(h_samples_quals.end(), sample.qual.begin(), sample.qual.end());
+        cur_offset += cur_len;
+        h_samples_offset.push_back(cur_offset);
+    }
+
+    cur_offset = 0;
+    h_signatures_offset.push_back(cur_offset);
+    for (auto& signature : signatures) {
+        size_t cur_len = signature.seq.length();
+        h_signatures_seqs.insert(h_signatures_seqs.end(), signature.seq.begin(), signature.seq.end());
+        cur_offset += cur_len;
+        h_signatures_offset.push_back(cur_offset);
+    }
+
+    for (auto& res : h_tmpResult) {
+        res.match_score = -1;
+    }
+
+    // samples on device
+    char *d_samples_quals, *d_samples_seqs;
+    unsigned char* d_samples_phred_score, *d_samples_hash;
+    size_t total_samples_len = h_samples_seqs.size();
+    size_t *d_samples_offset;
+
+    // signatures on device
+    char *d_signatures_seqs;
+    size_t total_signatures_len = h_signatures_seqs.size();
+    size_t *d_signatures_offset;
+
+    TmpResult* d_tmpResult;
+
+    // allocate memory for samples on device
+    cudaMalloc(&d_samples_seqs, total_samples_len * sizeof(char));
+    cudaMalloc(&d_samples_offset, (SAMPLES_SIZE + 1) * sizeof(size_t));
+    cudaMalloc(&d_samples_hash, SAMPLES_SIZE * sizeof(unsigned char));
+    cudaMalloc(&d_samples_quals, total_samples_len * sizeof(char));
+    cudaMalloc(&d_samples_phred_score, total_samples_len * sizeof(unsigned char));
+
+    // allocate memory for signatures on device
+    cudaMalloc(&d_signatures_seqs, total_signatures_len * sizeof(char));
+    cudaMalloc(&d_signatures_offset, (SIGNATURES_SIZE + 1) * sizeof(size_t));
+    cudaMalloc(&d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult));
+
+    // copy samples to device
+    cudaMemcpy(d_samples_seqs, h_samples_seqs.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_samples_offset, h_samples_offset.data(), (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_samples_quals, h_samples_quals.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice);
+
+    // copy signatures to device
+    cudaMemcpy(d_signatures_seqs, h_signatures_seqs.data(), total_signatures_len * sizeof(char), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_signatures_offset, h_signatures_offset.data(), (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
+
+    cudaMemcpy(d_tmpResult, h_tmpResult.data(), SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice);
+
+    // calculate phred score with the +33 version
+    int blk_size = 256;
+    int blk_num = (total_samples_len + blk_size - 1) / blk_size;
+    get_phred<<<blk_num, blk_size>>>(total_samples_len, d_samples_quals, d_samples_phred_score);
+    cudaDeviceSynchronize(); 
+    
+    // calculate hash value for all samples
+    blk_num = SAMPLES_SIZE;
+    get_hash<<<blk_num, blk_size, blk_size * sizeof(int)>>>(SAMPLES_SIZE, d_samples_phred_score, d_samples_offset, d_samples_hash);
+    cudaDeviceSynchronize();
+
+    // match the signatures
+    
+    dim3 grid(SAMPLES_SIZE, SIGNATURES_SIZE);
+    matcher<<<grid, blk_size, blk_size * (sizeof(double) + sizeof(unsigned char))>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
+    cudaDeviceSynchronize();
+    
+    
+    cudaMemcpy(h_tmpResult.data(), d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < SAMPLES_SIZE; i ++) {
+        for (int j = 0; j < SIGNATURES_SIZE; j ++) {
+            auto& cur = h_tmpResult[i * SIGNATURES_SIZE + j];
+            if (cur.match_score >= 0) {
+                matches.push_back({samples[i].name, signatures[j].name, cur.match_score, cur.hash});
+            }
+        }
+    }
+    
+    // release all the allocated memory on device
+    cudaFree(d_samples_seqs);
+    cudaFree(d_samples_offset);
+    cudaFree(d_samples_hash);
+    cudaFree(d_samples_quals);
+    cudaFree(d_samples_phred_score);
+    cudaFree(d_signatures_seqs);
+    cudaFree(d_signatures_offset);
+    cudaFree(d_tmpResult);
+
 }
