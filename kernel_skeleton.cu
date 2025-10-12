@@ -86,6 +86,8 @@ __global__ void matcher(
     size_t signature_end_offset = d_signatures_offset[signature_idx + 1];
     size_t signature_len = signature_end_offset - signature_start_offset;
 
+    if (signature_len > sample_len) return;
+
     size_t search_space = sample_len - signature_len + 1;
 
 
@@ -173,7 +175,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     
-    const int BATCH_SIZE = 2048;
+    const int BATCH_SIZE = 1024; // should be 2-power
 
     for (int batch_start = 0; batch_start < samples.size(); batch_start += BATCH_SIZE) {
 
