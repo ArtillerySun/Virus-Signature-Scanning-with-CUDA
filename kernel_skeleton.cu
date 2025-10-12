@@ -133,53 +133,66 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     
     const int SAMPLES_SIZE = samples.size();
     const int SIGNATURES_SIZE = signatures.size();
-    // samples on host
-    std::vector<char> h_samples_seqs;
-    std::vector<char> h_samples_quals;
-    std::vector<size_t> h_samples_offset;
 
-    // signatures on host
-    std::vector<char> h_signatures_seqs;
-    std::vector<size_t> h_signatures_offset;
-
-    std::vector<TmpResult> h_tmpResult(SAMPLES_SIZE * SIGNATURES_SIZE);
-
-    for (auto& res : h_tmpResult) {
-        res.match_score = -1.0f;
+    size_t total_samples_len = 0;
+    for (const auto& sample : samples) {
+        total_samples_len += sample.seq.length();
     }
 
-    size_t max_sample_len = 0, max_signature_len = 0;
-
-    size_t cur_offset = 0;
-    h_samples_offset.push_back(cur_offset);
-    for (auto& sample : samples) {
-        size_t cur_len = sample.seq.length();
-        max_sample_len = std::max(max_sample_len, cur_len);
-        h_samples_seqs.insert(h_samples_seqs.end(), sample.seq.begin(), sample.seq.end());
-        h_samples_quals.insert(h_samples_quals.end(), sample.qual.begin(), sample.qual.end());
-        cur_offset += cur_len;
-        h_samples_offset.push_back(cur_offset);
+    size_t total_signatures_len = 0;
+    for (const auto& signature : signatures) {
+        total_signatures_len += signature.seq.length();
     }
 
-    cur_offset = 0;
-    h_signatures_offset.push_back(cur_offset);
-    for (auto& signature : signatures) {
-        size_t cur_len = signature.seq.length();
-        max_signature_len = std::max(max_signature_len, cur_len);
-        h_signatures_seqs.insert(h_signatures_seqs.end(), signature.seq.begin(), signature.seq.end());
-        cur_offset += cur_len;
-        h_signatures_offset.push_back(cur_offset);
+    char *h_samples_seqs_pinned, *h_samples_quals_pinned, *h_signatures_seqs_pinned;
+    size_t *h_samples_offset_pinned, *h_signatures_offset_pinned;
+    TmpResult* h_tmpResult_pinned;
+
+    cudaHostAlloc(&h_samples_seqs_pinned, total_samples_len * sizeof(char), cudaHostAllocDefault);
+    cudaHostAlloc(&h_samples_quals_pinned, total_samples_len * sizeof(char), cudaHostAllocDefault);
+    cudaHostAlloc(&h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(size_t), cudaHostAllocDefault);
+    cudaHostAlloc(&h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaHostAllocDefault);
+    cudaHostAlloc(&h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaHostAllocDefault);
+    cudaHostAlloc(&h_tmpResult_pinned, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaHostAllocDefault);
+
+    size_t current_offset = 0;
+
+    h_samples_offset_pinned[0] = 0;
+    for (int i = 0; i < SAMPLES_SIZE; i++) {
+        const auto& sample = samples[i];
+        size_t len = sample.seq.length();
+        memcpy(h_samples_seqs_pinned + current_offset, sample.seq.c_str(), len);
+        memcpy(h_samples_quals_pinned + current_offset, sample.qual.c_str(), len);
+        
+        current_offset += len;
+        h_samples_offset_pinned[i + 1] = current_offset;
+    }
+
+    size_t max_signature_len = 0;
+    current_offset = 0;
+
+    h_signatures_offset_pinned[0] = 0;
+    for (int i = 0; i < SIGNATURES_SIZE; i++) {
+        const auto& signature = signatures[i];
+        size_t len = signature.seq.length();
+        max_signature_len = std::max(max_signature_len, len);
+        memcpy(h_signatures_seqs_pinned + current_offset, signature.seq.c_str(), len);
+        
+        current_offset += len;
+        h_signatures_offset_pinned[i + 1] = current_offset;
+    }
+
+    for (int i = 0; i < SAMPLES_SIZE * SIGNATURES_SIZE; i++) {
+        h_tmpResult_pinned[i].match_score = -1.0f;
     }
 
     // samples on device
     char *d_samples_quals, *d_samples_seqs;
     unsigned char* d_samples_phred_score, *d_samples_hash;
-    size_t total_samples_len = h_samples_seqs.size();
     size_t *d_samples_offset;
 
     // signatures on device
     char *d_signatures_seqs;
-    size_t total_signatures_len = h_signatures_seqs.size();
     size_t *d_signatures_offset;
 
     TmpResult* d_tmpResult;
@@ -200,15 +213,15 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaMalloc(&d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult));
 
     // copy samples to device
-    cudaMemcpyAsync(d_samples_seqs, h_samples_seqs.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_samples_offset, h_samples_offset.data(), (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_samples_quals, h_samples_quals.data(), total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_samples_seqs, h_samples_seqs_pinned, total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_samples_offset, h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_samples_quals, h_samples_quals_pinned, total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
 
     // copy signatures to device
-    cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs.data(), total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_signatures_offset, h_signatures_offset.data(), (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     
-    cudaMemcpyAsync(d_tmpResult, h_tmpResult.data(), SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_tmpResult, h_tmpResult_pinned, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice, stream);
 
     // calculate phred score with the +33 version
     int blk_size = 256;
@@ -223,12 +236,12 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     dim3 grid(SAMPLES_SIZE, SIGNATURES_SIZE);
     matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(float), stream>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
     
-    cudaMemcpyAsync(h_tmpResult.data(), d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(h_tmpResult_pinned, d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
     cudaStreamSynchronize(stream);
 
     for (int i = 0; i < SAMPLES_SIZE; i ++) {
         for (int j = 0; j < SIGNATURES_SIZE; j ++) {
-            auto& cur = h_tmpResult[i * SIGNATURES_SIZE + j];
+            auto& cur = h_tmpResult_pinned[i * SIGNATURES_SIZE + j];
             if (cur.match_score >= 0) {
                 matches.push_back({samples[i].name, signatures[j].name, cur.match_score, cur.hash});
             }
@@ -246,4 +259,10 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaFree(d_signatures_offset);
     cudaFree(d_tmpResult);
 
+    cudaFreeHost(h_samples_seqs_pinned);
+    cudaFreeHost(h_samples_quals_pinned);
+    cudaFreeHost(h_samples_offset_pinned);
+    cudaFreeHost(h_signatures_seqs_pinned);
+    cudaFreeHost(h_signatures_offset_pinned);
+    cudaFreeHost(h_tmpResult_pinned);
 }
