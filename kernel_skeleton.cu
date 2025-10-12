@@ -57,7 +57,7 @@ __global__ void get_hash(
 
 struct TmpResult {
     size_t sample, signature;
-    float match_score;
+    double match_score;
     int hash;
 };
 
@@ -86,13 +86,11 @@ __global__ void matcher(
     size_t signature_end_offset = d_signatures_offset[signature_idx + 1];
     size_t signature_len = signature_end_offset - signature_start_offset;
 
-    if (signature_len > sample_len) return;
-
     size_t search_space = sample_len - signature_len + 1;
 
 
     extern __shared__ char sh_mem[];
-    float* sh_max = (float*)(sh_mem);
+    double* sh_max = (double*)(sh_mem);
     char* sh_signature_seq = (char*)&sh_max[blockDim.x];
 
     for (size_t i = threadIdx.x; i < signature_len; i += blockDim.x) {
@@ -103,7 +101,7 @@ __global__ void matcher(
     __syncthreads();
 
     for (size_t i = threadIdx.x; i < search_space; i += blockDim.x) {
-        float sum = 0;
+        double sum = 0;
         bool flag = true;
         for (size_t j = 0; j < signature_len; j++) {
             if (!check(d_samples_seqs[sample_start_offset + i + j], sh_signature_seq[j])) {
@@ -113,14 +111,14 @@ __global__ void matcher(
             sum += d_samples_phred_score[sample_start_offset + i + j];
         }
         if (flag) {
-            sh_max[threadIdx.x] = fmaxf(sh_max[threadIdx.x], sum/signature_len);
+            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sum/signature_len);
         }
     }
     __syncthreads();
 
     for (int s = (blockDim.x >> 1); s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            sh_max[threadIdx.x] = fmaxf(sh_max[threadIdx.x], sh_max[threadIdx.x + s]);
+            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sh_max[threadIdx.x + s]);
         }
         __syncthreads();
     }
@@ -175,7 +173,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     
-    const int BATCH_SIZE = 1024; // should be 2-power
+    const int BATCH_SIZE = 1024;
 
     for (int batch_start = 0; batch_start < samples.size(); batch_start += BATCH_SIZE) {
 
@@ -249,7 +247,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
         // match the signatures
         dim3 grid(SAMPLES_SIZE, SIGNATURES_SIZE);
-        matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(float), stream>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
+        matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(double), stream>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
         
         cudaMemcpyAsync(h_tmpResult_pinned, d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
         cudaStreamSynchronize(stream);
