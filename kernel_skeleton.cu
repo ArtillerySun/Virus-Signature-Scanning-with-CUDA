@@ -24,15 +24,15 @@ __global__ void get_phred(
 __global__ void get_hash(
     const int len, 
     const unsigned char* d_samples_phred_score, 
-    const size_t* d_samples_offset, 
+    const int* d_samples_offset, 
     unsigned char* d_samples_hash) {
 
     int sample_idx = blockIdx.x;
     if (sample_idx >= len) return;
 
-    size_t start_offset = d_samples_offset[sample_idx];
-    size_t end_offset = d_samples_offset[sample_idx + 1];
-    size_t sample_len = end_offset - start_offset;
+    int start_offset = d_samples_offset[sample_idx];
+    int end_offset = d_samples_offset[sample_idx + 1];
+    int sample_len = end_offset - start_offset;
 
     extern __shared__ int sh_sum[];
     int thread_sum = 0;
@@ -40,7 +40,7 @@ __global__ void get_hash(
     sh_sum[threadIdx.x] = 0;
     __syncthreads();
 
-    for (size_t i = threadIdx.x; i < sample_len; i += blockDim.x) {
+    for (int i = threadIdx.x; i < sample_len; i += blockDim.x) {
         thread_sum += d_samples_phred_score[start_offset + i];
     }
     sh_sum[threadIdx.x] = thread_sum;
@@ -59,7 +59,7 @@ __global__ void get_hash(
 }
 
 struct TmpResult {
-    size_t sample, signature;
+    int sample, signature;
     double match_score;
     int hash;
 };
@@ -69,44 +69,44 @@ __global__ void matcher(
     const int SIGNATURES_SIZE,
     const unsigned char* d_samples_hash, 
     const unsigned char* d_samples_phred_score, 
-    const size_t* d_samples_offset, 
+    const int* d_samples_offset, 
     const char* d_samples_seqs, 
-    const size_t* d_signatures_offset, 
+    const int* d_signatures_offset, 
     const char* d_signatures_seqs, 
     TmpResult* tmpResult) {
     
-    size_t sample_idx = blockIdx.x ;
-    size_t signature_idx = blockIdx.y;
+    int sample_idx = blockIdx.x ;
+    int signature_idx = blockIdx.y;
 
     if (sample_idx >= SAMPLES_SIZE) return;
     if (signature_idx >= SIGNATURES_SIZE) return;
     
-    size_t sample_start_offset = d_samples_offset[sample_idx];
-    size_t sample_end_offset = d_samples_offset[sample_idx + 1];
-    size_t sample_len = sample_end_offset - sample_start_offset;
+    int sample_start_offset = d_samples_offset[sample_idx];
+    int sample_end_offset = d_samples_offset[sample_idx + 1];
+    int sample_len = sample_end_offset - sample_start_offset;
 
-    size_t signature_start_offset = d_signatures_offset[signature_idx];
-    size_t signature_end_offset = d_signatures_offset[signature_idx + 1];
-    size_t signature_len = signature_end_offset - signature_start_offset;
+    int signature_start_offset = d_signatures_offset[signature_idx];
+    int signature_end_offset = d_signatures_offset[signature_idx + 1];
+    int signature_len = signature_end_offset - signature_start_offset;
 
-    size_t search_space = sample_len - signature_len + 1;
+    int search_space = sample_len - signature_len + 1;
 
 
     extern __shared__ char sh_mem[];
     double* sh_max = (double*)(sh_mem);
     char* sh_signature_seq = (char*)&sh_max[blockDim.x];
 
-    for (size_t i = threadIdx.x; i < signature_len; i += blockDim.x) {
+    for (int i = threadIdx.x; i < signature_len; i += blockDim.x) {
         sh_signature_seq[i] = d_signatures_seqs[signature_start_offset + i];
     }
 
     sh_max[threadIdx.x] = -1.0;
     __syncthreads();
 
-    for (size_t i = threadIdx.x; i < search_space; i += blockDim.x) {
+    for (int i = threadIdx.x; i < search_space; i += blockDim.x) {
         double sum = 0;
         bool flag = true;
-        for (size_t j = 0; j < signature_len; j++) {
+        for (int j = 0; j < signature_len; j++) {
             if (!check(d_samples_seqs[sample_start_offset + i + j], sh_signature_seq[j])) {
                 flag = false;
                 break;
@@ -140,23 +140,23 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    size_t total_signatures_len = 0;
+    int total_signatures_len = 0;
     for (const auto& signature : signatures) {
         total_signatures_len += signature.seq.length();
     }
 
-    size_t* h_signatures_offset_pinned;
+    int* h_signatures_offset_pinned;
     char* h_signatures_seqs_pinned;
     cudaHostAlloc(&h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaHostAllocDefault);
-    cudaHostAlloc(&h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaHostAllocDefault);
+    cudaHostAlloc(&h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(int), cudaHostAllocDefault);
 
-    size_t max_signature_len = 0;
-    size_t current_offset = 0;
+    int max_signature_len = 0;
+    int current_offset = 0;
 
     h_signatures_offset_pinned[0] = 0;
     for (int i = 0; i < SIGNATURES_SIZE; i++) {
         const auto& signature = signatures[i];
-        size_t len = signature.seq.length();
+        int len = signature.seq.length();
         max_signature_len = std::max(max_signature_len, len);
         memcpy(h_signatures_seqs_pinned + current_offset, signature.seq.c_str(), len);
         
@@ -166,15 +166,15 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
     // signatures on device
     char *d_signatures_seqs;
-    size_t *d_signatures_offset;
+    int *d_signatures_offset;
 
     // allocate memory for signatures on device
     cudaMalloc(&d_signatures_seqs, total_signatures_len * sizeof(char));
-    cudaMalloc(&d_signatures_offset, (SIGNATURES_SIZE + 1) * sizeof(size_t));
+    cudaMalloc(&d_signatures_offset, (SIGNATURES_SIZE + 1) * sizeof(int));
 
     // copy signatures to device
     cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(int), cudaMemcpyHostToDevice, stream);
     
     const int BATCH_SIZE = 1024;
 
@@ -186,26 +186,26 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
         auto samples_begin = samples.begin() + batch_start;
         auto samples_end = samples.begin() + batch_end;
 
-        size_t total_samples_len = 0;
+        int total_samples_len = 0;
         for (auto sample = samples_begin; sample != samples_end; sample++) {
             total_samples_len += sample->seq.length();
         }
 
         char *h_samples_seqs_pinned, *h_samples_quals_pinned;
-        size_t *h_samples_offset_pinned;
+        int *h_samples_offset_pinned;
         TmpResult* h_tmpResult_pinned;
 
         cudaHostAlloc(&h_samples_seqs_pinned, total_samples_len * sizeof(char), cudaHostAllocDefault);
         cudaHostAlloc(&h_samples_quals_pinned, total_samples_len * sizeof(char), cudaHostAllocDefault);
-        cudaHostAlloc(&h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(size_t), cudaHostAllocDefault);
+        cudaHostAlloc(&h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(int), cudaHostAllocDefault);
         cudaHostAlloc(&h_tmpResult_pinned, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaHostAllocDefault);
 
-        size_t current_offset = 0;
+        int current_offset = 0;
 
-        size_t cnt = 0;
+        int cnt = 0;
         h_samples_offset_pinned[cnt] = 0;
         for (auto sample = samples_begin; sample != samples_end; sample++) {
-            size_t len = sample->seq.length();
+            int len = sample->seq.length();
             memcpy(h_samples_seqs_pinned + current_offset, sample->seq.c_str(), len);
             memcpy(h_samples_quals_pinned + current_offset, sample->qual.c_str(), len);
             
@@ -220,13 +220,13 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
         // samples on device
         char *d_samples_quals, *d_samples_seqs;
         unsigned char* d_samples_phred_score, *d_samples_hash;
-        size_t *d_samples_offset;
+        int *d_samples_offset;
 
         TmpResult* d_tmpResult;
 
         // allocate memory for samples on device
         cudaMalloc(&d_samples_seqs, total_samples_len * sizeof(char));
-        cudaMalloc(&d_samples_offset, (SAMPLES_SIZE + 1) * sizeof(size_t));
+        cudaMalloc(&d_samples_offset, (SAMPLES_SIZE + 1) * sizeof(int));
         cudaMalloc(&d_samples_hash, SAMPLES_SIZE * sizeof(unsigned char));
         cudaMalloc(&d_samples_quals, total_samples_len * sizeof(char));
         cudaMalloc(&d_samples_phred_score, total_samples_len * sizeof(unsigned char));
@@ -234,7 +234,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
         // copy samples to device
         cudaMemcpyAsync(d_samples_seqs, h_samples_seqs_pinned, total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_samples_offset, h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(d_samples_offset, h_samples_offset_pinned, (SAMPLES_SIZE + 1) * sizeof(int), cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(d_samples_quals, h_samples_quals_pinned, total_samples_len * sizeof(char), cudaMemcpyHostToDevice, stream);
 
         cudaMemcpyAsync(d_tmpResult, h_tmpResult_pinned, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyHostToDevice, stream);
