@@ -37,6 +37,9 @@ __global__ void get_hash(
     extern __shared__ int sh_sum[];
     int thread_sum = 0;
 
+    sh_sum[threadIdx.x] = 0;
+    __syncthreads();
+
     for (size_t i = threadIdx.x; i < sample_len; i += blockDim.x) {
         thread_sum += d_samples_phred_score[start_offset + i];
     }
