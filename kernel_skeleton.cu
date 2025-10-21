@@ -92,10 +92,9 @@ __global__ void solve_matcher(
 
     int search_space = sample_len - signature_len + 1;
 
-
-    extern __shared__ char sh_mem[];
-    double* sh_max = (double*)(sh_mem);
-    char* sh_signature_seq = (char*)&sh_max[blockDim.x];
+    extern __shared__ __align__(8) char sh_mem[];
+    double* sh_max = reinterpret_cast<double*>(sh_mem);
+    char* sh_signature_seq = reinterpret_cast<char*>(sh_max + blockDim.x);
 
     for (int i = threadIdx.x; i < signature_len; i += blockDim.x) {
         sh_signature_seq[i] = d_signatures_seqs[signature_start_offset + i];
@@ -284,9 +283,9 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
         get_hash<<<blk_num, blk_size, blk_size * sizeof(int), stream>>>(SAMPLES_SIZE, d_samples_phred_score, d_samples_offset, d_samples_hash);
 
         // match the signatures
-        // dim3 grid(SAMPLES_SIZE, SIGNATURES_SIZE);
-        // matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(double), stream>>>(SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
-        
+        int sharedBytes = blk_size * sizeof(double) + max_signature_len * sizeof(char);
+        sharedBytes = (sharedBytes + 7) & ~int(7);
+
         cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 16*1024*1024);
         const int B = 128;
         for (int s0 = 0; s0 < SAMPLES_SIZE; s0 += B) {
@@ -307,7 +306,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
 
             // grid.x=signatures, grid.y=B
             dim3 grid(s1 - s0, SIGNATURES_SIZE);
-            solve_matcher<<<grid, blk_size, max_signature_len * sizeof(char) + blk_size * sizeof(double), stream>>>(s0, SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
+            solve_matcher<<<grid, blk_size, sharedBytes, stream>>>(s0, SAMPLES_SIZE, SIGNATURES_SIZE, d_samples_hash, d_samples_phred_score, d_samples_offset, d_samples_seqs, d_signatures_offset, d_signatures_seqs, d_tmpResult);
         
         }
         cudaMemcpyAsync(h_tmpResult_pinned, d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
