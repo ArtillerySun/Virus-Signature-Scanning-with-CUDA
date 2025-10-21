@@ -6,7 +6,7 @@
 const int P = 97;
 
 __device__ inline bool check(char e, char f) {
-    return e == 'N' || f == 'N' || e == f;
+    return (e == 'N') | (f == 'N') | (e == f);
 }
 
 __global__ void get_phred(
