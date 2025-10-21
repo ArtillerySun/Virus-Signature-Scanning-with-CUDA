@@ -105,7 +105,6 @@ __global__ void solve_matcher(
     __syncthreads();
 
     for (int i = threadIdx.x; i < search_space; i += blockDim.x) {
-        double sum = 0;
         bool flag = true;
 
         int j = 0;
@@ -121,21 +120,10 @@ __global__ void solve_matcher(
             char g2 = sh_signature_seq[j + 2];
             char g3 = sh_signature_seq[j + 3];
 
-            // if (!check(d_samples_seqs[sample_start_offset + i + j], sh_signature_seq[j])) {
-            //     flag = false;
-            //     break;
-            // }
-            // sum += d_samples_phred_score[sample_start_offset + i + j];
-
             if (!check(s0, g0) || !check(s1, g1) || !check(s2, g2) || !check(s3, g3)) {
                 flag = false;
                 break;
             }
-
-            sum += d_samples_phred_score[sample_start_offset + i + j];
-            sum += d_samples_phred_score[sample_start_offset + i + j + 1];
-            sum += d_samples_phred_score[sample_start_offset + i + j + 2];
-            sum += d_samples_phred_score[sample_start_offset + i + j + 3];
         }
 
         // for the tail
@@ -143,12 +131,26 @@ __global__ void solve_matcher(
             char s = d_samples_seqs[sample_start_offset + i + j];
             char g = sh_signature_seq[j];
             if (!check(s, g)) { flag = false; break; }
+        }
+
+        if (!flag) continue;
+
+        double sum = 0;
+        j = 0;
+        
+        for (; j + 3 < signature_len; j += 4) {
+            sum += d_samples_phred_score[sample_start_offset + i + j];
+            sum += d_samples_phred_score[sample_start_offset + i + j + 1];
+            sum += d_samples_phred_score[sample_start_offset + i + j + 2];
+            sum += d_samples_phred_score[sample_start_offset + i + j + 3];
+        }
+
+        // for the tail
+        for (; j < signature_len; j++) {
             sum += d_samples_phred_score[sample_start_offset + i + j];
         }
 
-        if (flag) {
-            sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sum/signature_len);
-        }
+        sh_max[threadIdx.x] = fmax(sh_max[threadIdx.x], sum/signature_len);
     }
     __syncthreads();
 
