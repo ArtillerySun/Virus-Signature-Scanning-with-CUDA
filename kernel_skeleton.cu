@@ -209,6 +209,8 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
     // copy signatures to device
     cudaMemcpyAsync(d_signatures_seqs, h_signatures_seqs_pinned, total_signatures_len * sizeof(char), cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_signatures_offset, h_signatures_offset_pinned, (SIGNATURES_SIZE + 1) * sizeof(int), cudaMemcpyHostToDevice, stream);
+
+    cudaDeviceSynchronize();
     
     const int BATCH_SIZE = 1024;
 
@@ -310,7 +312,7 @@ void runMatcher(const std::vector<klibpp::KSeq>& samples, const std::vector<klib
         
         }
         cudaMemcpyAsync(h_tmpResult_pinned, d_tmpResult, SAMPLES_SIZE * SIGNATURES_SIZE * sizeof(TmpResult), cudaMemcpyDeviceToHost);
-        cudaStreamSynchronize(stream);
+        cudaDeviceSynchronize();
 
         for (int i = 0; i < SAMPLES_SIZE; i ++) {
             for (int j = 0; j < SIGNATURES_SIZE; j ++) {
