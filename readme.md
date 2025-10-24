@@ -1,5 +1,7 @@
 # ⚡ CUDA Parallel Signature Matcher
 
+This repository refines and extends the CUDA implementation from an academic project on high-performance signature scanning.
+
 [![CUDA](https://img.shields.io/badge/CUDA-Enabled-success?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
 [![Language](https://img.shields.io/badge/Language-CUDA%20C++-blue)]()
 [![License](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
@@ -146,6 +148,15 @@ make clean
 
 * [Raw Data (Google Sheets)](https://docs.google.com/spreadsheets/d/173EhBG5FrCEOqZYF1mLPmehFsPNLcst-DjjOt2DPYLg/edit?usp=sharing)
 * [Batch Script Example](https://github.com/nus-cs3210-students/cs3210-2510-a2-a2-e1297741-e1297745/blob/main/sbatch.sh)
+
+The files under [`bench/`](./bench/) — namely
+
+* [`bench-h100`](./bench/bench-h100)
+* [`bench-a100`](./bench/bench-a100)
+
+were **provided by the course’s official benchmarking framework**.
+They are included **for completeness and context only**.
+These benchmark programs and results were **not written or executed by the author** of this repository.
 
 ## 📜 License
 
