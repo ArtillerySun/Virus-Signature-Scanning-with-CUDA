@@ -106,6 +106,12 @@ Replacing pageable memory with pinned memory (`cudaHostAlloc`) enables direct DM
 make
 ````
 
+### Clean
+```
+make clean
+```
+
+
 ### Generate Test Data & Run
 
 ```bash
@@ -140,3 +146,7 @@ make
 
 * [Raw Data (Google Sheets)](https://docs.google.com/spreadsheets/d/173EhBG5FrCEOqZYF1mLPmehFsPNLcst-DjjOt2DPYLg/edit?usp=sharing)
 * [Batch Script Example](https://github.com/nus-cs3210-students/cs3210-2510-a2-a2-e1297741-e1297745/blob/main/sbatch.sh)
+
+## 📜 License
+
+This project is licensed under the [MIT License](./LICENSE).
