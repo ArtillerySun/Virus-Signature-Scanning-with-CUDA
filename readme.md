@@ -78,7 +78,7 @@ Replacing pageable memory with pinned memory (`cudaHostAlloc`) enables direct DM
 ### 🔹 Loop Unrolling & Two-Phase Matching
 - Manual loop unrolling (×4) improved instruction-level parallelism.  
 - Split comparison and scoring phases to minimize warp divergence.  
-- Results:
+- Results (2200 samples, 1000 signatures):
   - Runtime: **22.48 s → 13.04 s**
   - L2 cache hit rate: **22.7% → 33.9%**
   - DRAM traffic: **245 GB → 101 GB**
@@ -130,7 +130,7 @@ make clean
 
 | Parameter  | Range     | Description          |
 | ---------- | --------- | -------------------- |
-| Samples    | 1000–2000 | Each 100–2000 KB     |
+| Samples    | 1000–2200 | Each 100–2000 KB     |
 | Signatures | 500–1000  | Each 3–10 KB         |
 | N-ratio    | 0.01–0.10 | Wildcard probability |
 
